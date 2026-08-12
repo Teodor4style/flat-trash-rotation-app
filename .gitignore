@@ -1,0 +1,14 @@
+# Local Supabase configuration containing project credentials
+config.js
+
+# Environment-variable files
+.env
+.env.*
+!.env.example
+
+# Supabase local-development files
+supabase/.temp/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
