@@ -1,243 +1,280 @@
 # Flat Trash — Setup Guide
 
-This guide creates an independent, shared instance of Flat Trash.
-
-## What this version includes
-
-- Shared Supabase database
-- Realtime syncing between phones
-- Username + password login
-- Theodoros = Administrator
-- Prionto / Camila = Members
-- Three trash states: OK / Getting full / Needs taking
-- Voluntary trash action stored separately in History
-- Home / Away vacation handling
-- Admin can see usernames and reset another member's password
-- Existing passwords are never readable
-- Each user can change their own password
-- Row Level Security + controlled database functions
-
----
+This guide creates a fresh instance of Flat Trash with realtime data, browser push notifications, vacation handling, and recurring 8-hour trash reminders.
 
 ## 1. Create a Supabase project
 
-Create a free Supabase project.
+Create a Supabase project. You will need the project URL and a publishable key (or legacy anon key) for the browser app.
 
-You will later need:
-
-- Project URL
-- Publishable key (or legacy anon key)
-
-Do **not** put the `service_role` / secret key in the browser app.
-
----
+**Never put a Supabase secret/service-role key in the frontend.**
 
 ## 2. Create the three Auth users
 
-In Supabase Dashboard → Authentication → Users, create these users:
+In **Supabase Dashboard → Authentication → Users**, create:
 
-| Person | Internal Auth email | Role in app |
+| Person | Internal Auth email | App role |
 |---|---|---|
 | Theodoros | `theodoros@flat-trash.invalid` | Admin |
 | Prionto | `prionto@flat-trash.invalid` | Member |
 | Camila | `camila@flat-trash.invalid` | Member |
 
-Choose a temporary password for each one.
+Choose a temporary password for each account and make sure the users are confirmed/active.
 
-These addresses are only internal identifiers so the app can offer a username-only login screen.
-The users will type only:
+The synthetic email addresses are internal identifiers. The UI asks users only for the usernames `theodoros`, `prionto`, or `camila`.
 
-- `theodoros`
-- `prionto`
-- `camila`
+## 3. Create the base database
 
-Make sure the users are confirmed/active in Supabase Auth.
+Open **SQL Editor** in Supabase and run the complete contents of:
 
----
+```text
+supabase/schema.sql
+```
 
-## 3. Create the database
+This creates the household profiles, trash categories, activity history, rotation functions, Row Level Security, grants, and realtime publication.
 
-Open:
+## 4. Enable Supabase Cron
 
-Supabase Dashboard → SQL Editor
+Before installing the recurring-reminder migration, enable the **Cron / pg_cron** Postgres module in your Supabase project (Dashboard → Integrations → Cron).
 
-Copy the entire contents of:
+The reminder migration detects whether the `cron` schema exists. If Cron is already enabled, it creates the checker job automatically.
 
-`supabase/schema.sql`
+## 5. Run the migrations in order
 
-and run it.
+Run these files in the Supabase SQL Editor, in filename order:
 
-The script creates:
+```text
+supabase/migrations/20260818_add_notifications.sql
+supabase/migrations/20260819_add_recurring_trash_reminders.sql
+```
 
-- `profiles`
-- `trash_types`
-- `activity_log`
-- Row Level Security
-- rotation logic
-- status-change logic
-- vacation logic
-- realtime publication
-- the six trash categories
+The first migration adds notifications and Web Push subscriptions.
 
-Initial rotation:
+The second migration adds:
 
-Theodoros → Prionto → Camila
+- `needs_taking_since`
+- `next_reminder_at`
+- the final `set_trash_status` reminder scheduling logic
+- reminder cancellation in `take_out_trash`
+- `process_due_trash_reminders()`
+- the `trash_reminder` notification type
+- the recurring Cron checker (when Cron is already enabled)
 
----
+### If you enabled Cron after running the migration
 
-## 4. Deploy the secure admin password-reset function
+Run this once in SQL Editor:
 
-The function is here:
+```sql
+select cron.schedule(
+  'process-due-trash-reminders',
+  '*/5 * * * *',
+  $$select public.process_due_trash_reminders();$$
+);
+```
 
-`supabase/functions/admin-reset-password/index.ts`
+The checker runs every five minutes, but it creates a reminder only when a row's `next_reminder_at` timestamp is due. A new reminder then schedules the next one for approximately eight hours later.
 
-### Option A — Supabase Dashboard
+## 6. Generate a VAPID key pair
 
-1. Open **Edge Functions** in the Supabase Dashboard.
-2. Select **Deploy a new function → Via Editor**.
-3. Replace the example code with `supabase/functions/admin-reset-password/index.ts`.
-4. Name the function exactly `admin-reset-password` and deploy it.
-5. In the function settings, turn **Verify JWT with legacy secret** off. The function validates the caller's current session and administrator role itself.
+If Node.js is installed, one simple method is:
 
-### Option B — Supabase CLI
+```bash
+npx --yes web-push generate-vapid-keys --json
+```
 
-Install/login to the Supabase CLI, link this project, then from the Phase 2 folder run:
+This prints a `publicKey` and `privateKey`.
+
+- The **public key** is used by both the browser app and the push Edge Function.
+- The **private key** must remain secret and must never be committed to GitHub.
+
+## 7. Deploy `admin-reset-password`
+
+Source file:
+
+```text
+supabase/functions/admin-reset-password/index.ts
+```
+
+Deploy it as an Edge Function named exactly:
+
+```text
+admin-reset-password
+```
+
+The function performs its own caller/admin validation. Configure its JWT verification to match the function's current deployment requirements.
+
+With the Supabase CLI, from the project root:
 
 ```bash
 supabase functions deploy admin-reset-password
 ```
 
-Supabase hosted Edge Functions provide the project secrets needed by the function.
-The secret/service-role credential stays server-side and is never sent to the browser.
+## 8. Configure push secrets
 
----
+In **Supabase Dashboard → Edge Functions → Secrets**, create:
 
-## 5. Configure the web app
+```text
+VAPID_PUBLIC_KEY=<your generated public key>
+VAPID_PRIVATE_KEY=<your generated private key>
+VAPID_SUBJECT=<your deployed site origin, e.g. https://example.com>
+NOTIFICATION_WEBHOOK_SECRET=<a long random secret you generate>
+```
 
-Copy `config.example.js` to a new local file named `config.js`.
+`send-push-notifications` also uses the server-side Supabase secret credentials provided to hosted Edge Functions. Do not copy those credentials into the browser application.
 
-Open `config.js`.
+## 9. Deploy `send-push-notifications`
 
-Replace:
+Source file:
+
+```text
+supabase/functions/send-push-notifications/index.ts
+```
+
+Deploy it with the exact name:
+
+```text
+send-push-notifications
+```
+
+The function is intended to receive a Database Webhook and authenticates that webhook with the custom `x-webhook-secret` header, so the platform JWT check must not block the webhook before the function code can validate it.
+
+With the Supabase CLI, this is typically deployed with JWT verification disabled for this webhook receiver:
+
+```bash
+supabase functions deploy send-push-notifications --no-verify-jwt
+```
+
+## 10. Create the Database Webhook
+
+Create a Supabase Database Webhook with these settings:
+
+```text
+Name: send_push_notifications
+Table: public.notifications
+Event: INSERT
+Method: POST
+URL: https://<YOUR_PROJECT_REF>.supabase.co/functions/v1/send-push-notifications
+```
+
+Add this HTTP header:
+
+```text
+x-webhook-secret: <the exact same value stored as NOTIFICATION_WEBHOOK_SECRET>
+```
+
+Do not put the secret in HTTP parameters or commit it to the repository.
+
+Each inserted notification can now trigger the Edge Function, which loads the recipient's registered push subscriptions and sends the Web Push message.
+
+## 11. Configure the browser app
+
+Copy:
+
+```text
+config.example.js
+```
+
+to:
+
+```text
+config.js
+```
+
+Then fill in:
 
 ```js
 export const SUPABASE_URL = "YOUR_SUPABASE_URL";
 export const SUPABASE_PUBLISHABLE_KEY = "YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY";
+export const USER_EMAIL_DOMAIN = "flat-trash.invalid";
+export const VAPID_PUBLIC_KEY = "YOUR_VAPID_PUBLIC_KEY";
 ```
 
-with the values from:
+The VAPID public key must be the same public key configured in the Edge Function secrets.
 
-Supabase Dashboard → Project Settings → API
+`config.js` is intentionally ignored by Git. Never add a service-role/secret key, VAPID private key, or webhook secret to it.
 
-A publishable/anon key is intentionally usable from a browser when Row Level Security is correctly configured.
+## 12. Test locally
 
-Never paste a Supabase secret/service-role key into `config.js`.
-
----
-
-## 6. Test locally
-
-Open a terminal inside the Phase 2 folder and run:
+From the project folder:
 
 ```bash
 python -m http.server 8080
 ```
 
-Then open:
+Open:
 
 ```text
 http://localhost:8080
 ```
 
-Sign in as one of:
+Sign in with one of the configured usernames and its password.
 
-```text
-theodoros
-prionto
-camila
+For full production PWA/Web Push behaviour, deploy the app over HTTPS.
+
+## 13. Test notifications
+
+A useful end-to-end test is:
+
+1. Sign in on a supported browser/device.
+2. Open the **Notifications** tab and enable notifications for that device.
+3. Change a trash category to **Needs taking** while it is that user's turn.
+4. Confirm the immediate notification appears in the app and as a push notification.
+5. In SQL Editor, verify the row has `needs_taking_since` and `next_reminder_at` populated.
+6. For a controlled reminder test, temporarily make a `next_reminder_at` value due and run:
+
+```sql
+select public.process_due_trash_reminders();
 ```
 
-using the password assigned to that account.
+7. Confirm a `trash_reminder` notification is created and `next_reminder_at` moves about eight hours forward.
+8. Press **Mark as taken** and verify both reminder timestamps become `NULL`.
 
----
+Do not leave test timestamps modified after testing.
 
-## 7. Test realtime syncing
+## 14. Test realtime and vacation handling
 
-Open the app in two browsers/devices.
+Open the app in two browsers/devices with different users.
 
-Example:
+- Status changes should appear without a manual reload.
+- A user marked away should be skipped for pending/new turns according to the database rotation logic.
+- Reassignments and household notification records are stored in the shared Supabase backend.
 
-1. Sign in as Theodoros in one browser.
-2. Sign in as Camila in another.
-3. Camila marks Plastic as "Needs taking".
-4. Theodoros should see that change without manually copying files.
-5. If it is Prionto's turn and Theodoros presses "I'll take it instead", History stores:
-   - expected person = Prionto
-   - actual person = Theodoros
-   - voluntary = true
+## 15. Deploy the PWA
 
----
+Host the static frontend on an HTTPS host such as Netlify, Cloudflare Pages, or GitHub Pages.
 
-## 8. Admin behavior
+The deployed site needs a correctly configured `config.js`, but that file must contain only browser-safe values:
 
-When Theodoros signs in, an **Admin** tab appears.
+- Supabase project URL
+- Supabase publishable/anon key
+- username email domain
+- VAPID public key
 
-Theodoros can:
+Never deploy the VAPID private key, webhook secret, or Supabase server secret in frontend files.
 
-- see everyone's username
-- change anyone's availability
-- reset Prionto's or Camila's password to a new temporary password
+## Data model additions for notifications
 
-Theodoros cannot see an existing password. This is intentional security behavior.
+### `notifications`
 
-Prionto and Camila do not see the Admin tab.
+Stores user-facing notification records, delivery status, and read state.
 
----
+### `push_subscriptions`
 
-## 9. Put it online for Android and iPhone
+Stores the browser Push API subscription for each registered user/device.
 
-The frontend is a static Progressive Web App. You can host it on a static host such as GitHub Pages, Netlify, or Cloudflare Pages. Ensure the deployed site includes a configured `config.js`, but never include a secret or `service_role` key.
+### `trash_types.needs_taking_since`
 
-After it is hosted over HTTPS:
+Tracks when the current **Needs taking** period began so reminder text can report 8, 16, 24 hours, and so on.
 
-- Android users can add/install the web app from Chrome.
-- iPhone users can add it to the Home Screen from Safari.
+### `trash_types.next_reminder_at`
 
-All three phones connect to the same Supabase backend.
+Tracks when the next recurring reminder becomes due. Marking the trash as taken clears this value and stops further reminders.
 
----
+## Security checklist
 
-## Data model
-
-### `profiles`
-
-Stores:
-
-- username
-- display name
-- admin/member role
-- Home/Away
-- away-until date
-- rotation position
-
-### `trash_types`
-
-Stores:
-
-- trash name
-- status
-- next person
-- last person
-- last date/time
-
-### `activity_log`
-
-Stores:
-
-- status changes
-- normal trash completion
-- voluntary substitution
-- vacation changes
-- admin password resets
-
-No plaintext passwords are stored in these tables.
+- Do not commit `config.js`.
+- Do not commit `.env` files.
+- Do not commit Supabase secret/service-role keys.
+- Do not commit `VAPID_PRIVATE_KEY`.
+- Do not commit `NOTIFICATION_WEBHOOK_SECRET`.
+- Keep Row Level Security enabled.
+- Keep the webhook secret identical in Supabase Secrets and the webhook's `x-webhook-secret` header.

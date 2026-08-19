@@ -49,6 +49,10 @@
     <nav class="tabs">
       <button class="tab active" data-tab="home">Home</button>
       <button class="tab" data-tab="history">History</button>
+      <button class="tab notification-tab" data-tab="notifications">
+  Notifications
+  <span id="notificationBadge" class="notification-badge hidden">0</span>
+</button>
       <button class="tab" data-tab="flatmates">Flatmates</button>
       <button class="tab admin-only hidden" data-tab="admin">Admin</button>
       <button class="tab" data-tab="account">Account</button>
@@ -78,7 +82,50 @@
         </div>
         <div id="historyList" class="history"></div>
       </section>
+<section id="notifications" class="panel">
+  <div class="section-head">
+    <div>
+      <h2>Notifications</h2>
+      <p class="muted">
+        View household alerts and manage notifications for this device.
+      </p>
+    </div>
 
+    <button
+      id="markAllNotificationsReadBtn"
+      class="secondary"
+      type="button"
+    >
+      Mark all as read
+    </button>
+  </div>
+
+  <div class="card notification-settings">
+    <div>
+      <h3>Device notifications</h3>
+      <p class="muted">
+        Receive an alert even when Flat Trash is not open.
+      </p>
+      <strong id="notificationStatus">
+        Checking notification status…
+      </strong>
+      <p id="notificationHelp" class="muted"></p>
+    </div>
+
+    <button
+      id="notificationToggleBtn"
+      class="primary"
+      type="button"
+    >
+      Enable notifications
+    </button>
+  </div>
+
+  <div
+    id="notificationList"
+    class="notifications-list"
+  ></div>
+</section>
       <section id="flatmates" class="panel">
         <h2>Flatmates</h2>
         <p class="muted">Members can change their own availability. Theodoros can manage everyone.</p>
